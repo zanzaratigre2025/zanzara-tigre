@@ -4,6 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 from io import BytesIO
+from pydub import AudioSegment
 
 # --- Configuration ---
 BASE_DIR = Path(__file__).resolve().parent
@@ -88,7 +89,6 @@ user_additional_instructions = st.text_area(
     placeholder="Es: Enfatizza gli aspetti controversi, oppure adotta un tono più formale..."
 )
 
-# GPT helper unchanged
 def gpt_request(model_id, query_content, temperature=0.8):
     messages = [{'role': 'user', 'content': query_content}]
     try:
@@ -120,30 +120,35 @@ if uploaded_file is not None:
             st.error("Impossibile caricare i componenti del prompt dai file. Controlla i file e i log.")
             st.stop()
 
-        # --- New transcription logic using BytesIO ---
-        from io import BytesIO
+        # --- Convert input to MP3 ---
+        uploaded_bytes = uploaded_file.getvalue()
+        input_format = uploaded_file.type.split('/')[-1] if uploaded_file.type else Path(uploaded_file.name).suffix.replace('.', '')
+        audio = AudioSegment.from_file(BytesIO(uploaded_bytes), format=input_format)
+        mp3_buffer = BytesIO()
+        audio.export(mp3_buffer, format="mp3")
+        mp3_bytes = mp3_buffer.getvalue()
 
-        audio_bytes = uploaded_file.getvalue()
+        # --- Debug info ---
         st.write({
-            "filename": uploaded_file.name,
-            "content_type": uploaded_file.type,
-            "size_bytes": len(audio_bytes)
+            "original_size_bytes": len(uploaded_bytes),
+            "mp3_size_bytes": len(mp3_bytes)
         })
 
+        # --- Size check after conversion ---
         MAX_BYTES = 25 * 1024 * 1024  # 25 MB
-        if len(audio_bytes) > MAX_BYTES:
-            st.error("Il file supera il limite di 25 MB per Whisper; riduci la dimensione o usa un estratto più breve.")
+        if len(mp3_bytes) > MAX_BYTES:
+            st.error("Il file MP3 supera il limite di 25 MB per Whisper; riduci la dimensione o usa un estratto più breve.")
             st.stop()
 
-        buffer = BytesIO(audio_bytes)
-
+        mp3_buffer.seek(0)
         try:
             with st.spinner("Attendere prego: Trascrizione audio in corso..."):
                 transcript = client.audio.transcriptions.create(
                     model="whisper-1",
-                    file=buffer,
+                    file=mp3_buffer,
                     response_format="text"
                 )
+
             trascrizione = transcript["text"].replace("\n", " ").strip()
 
             st.subheader("📄 Trascrizione Ottenuta:")
@@ -153,6 +158,7 @@ if uploaded_file is not None:
             st.error(f"Errore durante la trascrizione Whisper: {e}")
             st.stop()
 
+        # --- GPT Analysis ---
         if trascrizione:
             with st.spinner("Attendere prego: Analisi GPT-4o in corso..."):
                 esempi_block = "<esempi>\n"
