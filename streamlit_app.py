@@ -44,19 +44,29 @@ def load_esempi():
 
 # --- OpenAI API Key Handling ---
 try:
+    # Attempt to get the API key from Streamlit secrets first
     openai_api_key = st.secrets.get("OPENAI_API_KEY")
-except Exception: # Broad exception for st.secrets if not available or misconfigured
+except (AttributeError, KeyError): # Handle cases where st.secrets might not be available or key not set
     openai_api_key = None
+
 
 st.set_page_config(layout="wide")
 st.title("🎙️ Zanzara Tigre generator 📰")
 
 if not openai_api_key:
-    openai_api_key = st.text_input("🔑 Inserisci la tua OpenAI API Key (o configurala nei secrets di Streamlit Cloud):", type="password")
+    openai_api_key_input = st.text_input(
+        "🔑 Inserisci la tua OpenAI API Key (o configurala nei secrets di Streamlit Cloud):",
+        type="password",
+        key="api_key_input_main" # Add a key for uniqueness
+    )
+    if openai_api_key_input:
+        openai_api_key = openai_api_key_input
+    else:
+        st.warning("Per favore inserisci la tua OpenAI API Key per continuare.")
+        st.stop()
+else:
+    st.success("OpenAI API Key caricata correttamente dai secrets. ✅")
 
-if not openai_api_key:
-    st.warning("Per favore inserisci la tua OpenAI API Key per continuare.")
-    st.stop()
 
 # Initialize OpenAI client
 try:
@@ -67,7 +77,19 @@ except Exception as e:
 
 # --- File Uploader ---
 st.header("1. Carica il tuo file audio o video")
-uploaded_file = st.file_uploader("Scegli un file audio (es. MP3, WAV, M4A) o video (es. MP4, MOV, AVI)", type=['mp3', 'wav', 'm4a', 'mp4', 'mov', 'avi', 'ogg', 'webm'])
+uploaded_file = st.file_uploader(
+    "Scegli un file audio (es. MP3, WAV, M4A) o video (es. MP4, MOV, AVI)",
+    type=['mp3', 'wav', 'm4a', 'mp4', 'mov', 'avi', 'ogg', 'webm']
+)
+
+# --- Optional User Instructions ---
+st.header("2. (Opzionale) Aggiungi istruzioni personalizzate")
+user_additional_instructions = st.text_area(
+    "Se hai istruzioni specifiche aggiuntive per GPT-4o, inseriscile qui. Verranno aggiunte al prompt.",
+    height=100,
+    placeholder="Es: Enfatizza gli aspetti controversi, oppure adotta un tono più formale..."
+)
+
 
 def gpt_request(model_id, query_content, temperature=0.8):
     """
@@ -95,34 +117,39 @@ def gpt_request(model_id, query_content, temperature=0.8):
 if uploaded_file is not None:
     st.audio(uploaded_file, format=uploaded_file.type if uploaded_file.type else None)
 
+    st.header("3. Avvia l'analisi")
     if st.button("🚀 Trascrivi e Analizza con GPT-4o"):
         # Load prompt components
         main_prompt_instruction = load_main_prompt()
         esempi_texts = load_esempi()
 
-        if not main_prompt_instruction or not esempi_texts:
-            st.error("Impossibile caricare i componenti del prompt. Controlla i file.")
+        if not main_prompt_instruction or not esempi_texts: # Basic check, more robust checks in loading functions
+            st.error("Impossibile caricare i componenti del prompt dai file. Controlla i file e i log.")
             st.stop()
 
         with st.spinner("Attendere prego: Trascrizione audio in corso..."):
             trascrizione = "" # Initialize to ensure it's defined
             try:
+                # Save the uploaded file temporarily to pass its path to OpenAI
                 with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
                     tmp_file.write(uploaded_file.getvalue())
                     tmp_file_path = tmp_file.name
 
+                # Call Whisper API for transcription
                 with open(tmp_file_path, "rb") as audio_file_to_transcribe:
                     transcript_response = client.audio.transcriptions.create(
                         model="whisper-1",
                         file=audio_file_to_transcribe,
-                        response_format="text"
+                        response_format="text" # Get plain text directly
                     )
                 trascrizione = str(transcript_response).replace("\n", " ").replace("  ", " ")
+
+                # Clean up the temporary file
                 os.remove(tmp_file_path)
 
                 st.subheader("📄 Trascrizione Ottenuta:")
                 with st.expander("Mostra/Nascondi Trascrizione", expanded=False):
-                    st.text_area("", trascrizione, height=150)
+                    st.text_area("Testo trascritto:", trascrizione, height=150, key="transcription_output")
 
             except openai.APIConnectionError as e:
                 st.error(f"Errore di connessione API OpenAI (Whisper): {e}")
@@ -145,18 +172,24 @@ if uploaded_file is not None:
                     esempi_block += f"        <esempio>\n            {esempio_text}\n        </esempio>\n"
                 esempi_block += "</esempi>"
 
+                # Prepare user's additional instructions
+                additional_instructions_block = ""
+                if user_additional_instructions and user_additional_instructions.strip():
+                    additional_instructions_block = f"\n<additional_instructions>\n{user_additional_instructions.strip()}\n</additional_instructions>\n"
+
                 # Construct the full prompt for GPT-4o
                 full_prompt_for_gpt = f"""{main_prompt_instruction}
 
 {esempi_block}
-
+{additional_instructions_block}
 <input>
     {trascrizione}
 </input>
 """
-                if st.checkbox("Mostra prompt completo inviato a GPT-4o (per debug)", False):
-                    st.text_area("Prompt GPT-4o:", full_prompt_for_gpt, height=300)
+                if st.checkbox("Mostra prompt completo inviato a GPT-4o (per debug)", False, key="show_prompt_checkbox"):
+                    st.text_area("Prompt GPT-4o:", full_prompt_for_gpt, height=300, key="full_prompt_display")
 
+                # Call GPT-4o
                 gpt_response_obj = gpt_request("gpt-4o", full_prompt_for_gpt, 0.8)
 
                 if gpt_response_obj:
