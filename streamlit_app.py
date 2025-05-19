@@ -138,11 +138,11 @@ if uploaded_file is not None:
                 # Call Whisper API for transcription
                 with open(tmp_file_path, "rb") as audio_file_to_transcribe:
                     transcript_response = client.audio.transcriptions.create(
-                        model="whisper-1",
+                        model="gpt-4o-transcribe",
                         file=audio_file_to_transcribe,
                         response_format="text" # Get plain text directly
                     )
-                trascrizione = str(transcript_response).replace("\n", " ").replace("  ", " ")
+                trascrizione = transcript_response.text.replace("\n", " ").replace("  ", " ")
 
                 # Clean up the temporary file
                 os.remove(tmp_file_path)
