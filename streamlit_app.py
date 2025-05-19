@@ -49,7 +49,7 @@ except Exception: # Broad exception for st.secrets if not available or misconfig
     openai_api_key = None
 
 st.set_page_config(layout="wide")
-st.title("🎙️ Analizzatore di Trascrizioni Audio/Video  журналист Style 📰")
+st.title("🎙️ Zanzara Tigre generator 📰")
 
 if not openai_api_key:
     openai_api_key = st.text_input("🔑 Inserisci la tua OpenAI API Key (o configurala nei secrets di Streamlit Cloud):", type="password")
