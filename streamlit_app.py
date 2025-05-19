@@ -1,10 +1,8 @@
 import streamlit as st
 import openai
 import os
-import tempfile
 from pathlib import Path
 from io import BytesIO
-from pydub import AudioSegment
 
 # --- Configuration ---
 BASE_DIR = Path(__file__).resolve().parent
@@ -15,6 +13,7 @@ NUM_ESEMPI = 6  # Number of zanzaraX.txt files
 # --- Helper Functions to Load External Files ---
 @st.cache_data
 def load_main_prompt():
+    """Loads the main prompt from prompt.txt."""
     try:
         with open(PROMPT_FILE, "r", encoding="utf-8") as f:
             return f.read().strip()
@@ -27,6 +26,7 @@ def load_main_prompt():
 
 @st.cache_data
 def load_esempi():
+    """Loads example texts from the esempi/ directory."""
     esempi_content = []
     for i in range(1, NUM_ESEMPI + 1):
         file_path = ESEMPI_DIR / f"zanzara{i}.txt"
@@ -35,6 +35,7 @@ def load_esempi():
                 esempi_content.append(f.read().strip())
         except FileNotFoundError:
             st.error(f"Errore: Il file '{file_path.name}' non è stato trovato in '{ESEMPI_DIR.name}'.")
+            # Continue to load other examples if one is missing
             continue
         except Exception as e:
             st.error(f"Errore durante la lettura di '{file_path.name}': {e}")
@@ -46,8 +47,10 @@ def load_esempi():
 
 # --- OpenAI API Key Handling ---
 try:
+    # Attempt to get API key from Streamlit secrets
     openai_api_key = st.secrets.get("OPENAI_API_KEY")
 except (AttributeError, KeyError):
+    # Fallback if st.secrets is not available or key is not found
     openai_api_key = None
 
 st.set_page_config(layout="wide")
@@ -57,7 +60,8 @@ if not openai_api_key:
     openai_api_key_input = st.text_input(
         "🔑 Inserisci la tua OpenAI API Key (o configurala nei secrets di Streamlit Cloud):",
         type="password",
-        key="api_key_input_main"
+        key="api_key_input_main",
+        help="La tua API key è necessaria per utilizzare i servizi OpenAI."
     )
     if openai_api_key_input:
         openai_api_key = openai_api_key_input
@@ -76,9 +80,12 @@ except Exception as e:
 
 # --- File Uploader ---
 st.header("1. Carica il tuo file audio o video")
+# Supported formats by OpenAI Whisper API
+# https://platform.openai.com/docs/guides/speech-to-text/supported-formats
+supported_formats = ['flac', 'mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'ogg', 'wav', 'webm']
 uploaded_file = st.file_uploader(
-    "Scegli un file audio (es. MP3, WAV, M4A) o video (es. MP4, MOV, AVI)",
-    type=['mp3', 'wav', 'm4a', 'mp4', 'mov', 'avi', 'ogg', 'webm']
+    f"Scegli un file audio o video (formati supportati: {', '.join(supported_formats)})",
+    type=supported_formats
 )
 
 # --- Optional User Instructions ---
@@ -90,6 +97,7 @@ user_additional_instructions = st.text_area(
 )
 
 def gpt_request(model_id, query_content, temperature=0.8):
+    """Sends a request to the OpenAI Chat Completions API."""
     messages = [{'role': 'user', 'content': query_content}]
     try:
         response = client.chat.completions.create(
@@ -109,6 +117,7 @@ def gpt_request(model_id, query_content, temperature=0.8):
     return None
 
 if uploaded_file is not None:
+    # Display the uploaded audio file
     st.audio(uploaded_file, format=uploaded_file.type if uploaded_file.type else None)
 
     st.header("3. Avvia l'analisi")
@@ -116,54 +125,62 @@ if uploaded_file is not None:
         main_prompt_instruction = load_main_prompt()
         esempi_texts = load_esempi()
 
-        if not main_prompt_instruction or not esempi_texts:
-            st.error("Impossibile caricare i componenti del prompt dai file. Controlla i file e i log.")
+        if not main_prompt_instruction: # Examples can be empty if not all found
+            st.error("Impossibile caricare il prompt principale. Controlla il file 'prompt.txt' e i log.")
             st.stop()
 
-        # --- Convert input to MP3 ---
-        uploaded_bytes = uploaded_file.getvalue()
-        input_format = uploaded_file.type.split('/')[-1] if uploaded_file.type else Path(uploaded_file.name).suffix.replace('.', '')
-        audio = AudioSegment.from_file(BytesIO(uploaded_bytes), format=input_format)
-        mp3_buffer = BytesIO()
-        audio.export(mp3_buffer, format="mp3")
-        mp3_bytes = mp3_buffer.getvalue()
+        # --- File size check ---
+        # OpenAI Whisper API has a 25 MB file size limit.
+        MAX_BYTES = 25 * 1024 * 1024  # 25 MB
+        if uploaded_file.size > MAX_BYTES:
+            st.error(f"Il file caricato ({uploaded_file.size / (1024*1024):.2f} MB) supera il limite di 25 MB per l'API Whisper. Riduci la dimensione del file o usa un estratto più breve.")
+            st.stop()
 
         # --- Debug info ---
         st.write({
-            "original_size_bytes": len(uploaded_bytes),
-            "mp3_size_bytes": len(mp3_bytes)
+            "uploaded_file_name": uploaded_file.name,
+            "uploaded_file_size_bytes": uploaded_file.size,
+            "uploaded_file_type": uploaded_file.type
         })
 
-        # --- Size check after conversion ---
-        MAX_BYTES = 25 * 1024 * 1024  # 25 MB
-        if len(mp3_bytes) > MAX_BYTES:
-            st.error("Il file MP3 supera il limite di 25 MB per Whisper; riduci la dimensione o usa un estratto più breve.")
-            st.stop()
-
-        mp3_buffer.seek(0)
+        trascrizione = None
         try:
             with st.spinner("Attendere prego: Trascrizione audio in corso..."):
-                transcript = client.audio.transcriptions.create(
+                # Reset file pointer before sending to API
+                uploaded_file.seek(0)
+                # Transcribe using Whisper API
+                # The `uploaded_file` object (a BytesIO subclass) can be passed directly.
+                # The OpenAI SDK will handle reading its name and content type.
+                transcript_obj = client.audio.transcriptions.create(
                     model="whisper-1",
-                    file=mp3_buffer,
-                    response_format="text"
+                    file=uploaded_file, # Pass the UploadedFile object directly
+                    response_format="text" # Get plain text output
                 )
+            
+            # `transcript_obj` is a string when response_format="text"
+            # For newer versions of openai client, it might be an object with a .text attribute
+            if isinstance(transcript_obj, str):
+                 trascrizione = transcript_obj.replace("\n", " ").strip()
+            else:
+                 # Assuming it's a Transcription object if not a string
+                 trascrizione = transcript_obj.text.replace("\n", " ").strip()
 
-            trascrizione = transcript["text"].replace("\n", " ").strip()
 
             st.subheader("📄 Trascrizione Ottenuta:")
             with st.expander("Mostra/Nascondi Trascrizione", expanded=False):
                 st.text_area("Testo trascritto:", trascrizione, height=150, key="transcription_output")
         except Exception as e:
             st.error(f"Errore durante la trascrizione Whisper: {e}")
+            st.exception(e) # Provides more details for debugging
             st.stop()
 
         # --- GPT Analysis ---
         if trascrizione:
             with st.spinner("Attendere prego: Analisi GPT-4o in corso..."):
                 esempi_block = "<esempi>\n"
-                for esempio_text in esempi_texts:
-                    esempi_block += f"        <esempio>\n            {esempio_text}\n        </esempio>\n"
+                if esempi_texts: # Only add block if examples were loaded
+                    for esempio_text in esempi_texts:
+                        esempi_block += f"        <esempio>\n            {esempio_text}\n        </esempio>\n"
                 esempi_block += "</esempi>"
 
                 additional_instructions_block = ""
@@ -184,14 +201,16 @@ if uploaded_file is not None:
 
                 gpt_response_obj = gpt_request("gpt-4o", full_prompt_for_gpt, 0.8)
 
-                if gpt_response_obj:
+                if gpt_response_obj and gpt_response_obj.choices:
                     risultato_gpt = gpt_response_obj.choices[0].message.content
                     st.subheader("📰 Risultato dall'Analisi GPT-4o:")
                     st.markdown(risultato_gpt)
                 else:
-                    st.error("Non è stato possibile ottenere una risposta da GPT-4o.")
-        else:
-            st.error("La trascrizione è vuota o non è stata completata. Impossibile procedere con l'analisi GPT.")
+                    st.error("Non è stato possibile ottenere una risposta da GPT-4o o la risposta era vuota.")
+        elif trascrizione is not None: # Check if transcription is empty string
+             st.warning("La trascrizione è vuota. Impossibile procedere con l'analisi GPT.")
+        else: # Transcription failed (trascrizione is None)
+            st.error("La trascrizione non è stata completata. Impossibile procedere con l'analisi GPT.")
 else:
     st.info("Carica un file audio o video per iniziare.")
 
