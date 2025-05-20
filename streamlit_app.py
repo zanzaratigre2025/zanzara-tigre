@@ -10,7 +10,7 @@ PROMPT_FILE = BASE_DIR / "prompt.txt"
 ESEMPI_DIR = BASE_DIR / "esempi"
 NUM_ESEMPI = 6  # Number of zanzaraX.txt files
 GPT_MODEL = "gpt-4.1"  # GPT model for analysis
-TRANSCRIPTION_MODEL = "gpt-4o-mini-audio-preview"  # Transcription model
+TRANSCRIPTION_MODEL = "whisper-1"  # Transcription model
 
 # --- Helper Functions to Load External Files ---
 @st.cache_data
