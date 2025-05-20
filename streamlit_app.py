@@ -2,15 +2,15 @@ import streamlit as st
 import openai
 import os
 from pathlib import Path
-from io import BytesIO
+# from io import BytesIO # No longer strictly needed with current OpenAI SDK and Streamlit file handling
 
 # --- Configuration ---
 BASE_DIR = Path(__file__).resolve().parent
 PROMPT_FILE = BASE_DIR / "prompt.txt"
 ESEMPI_DIR = BASE_DIR / "esempi"
 NUM_ESEMPI = 6  # Number of zanzaraX.txt files
-GPT_MODEL = "gpt-4.1"  # Added constant for GPT model
-TRANSCRIPTION_MODEL = "gpt-4o-mini-audio-preview"  # Added constant for Transcription model
+GPT_MODEL = "gpt-4.1"  # GPT model for analysis
+TRANSCRIPTION_MODEL = "gpt-4o-mini-audio-preview"  # Transcription model
 
 # --- Helper Functions to Load External Files ---
 @st.cache_data
@@ -36,7 +36,8 @@ def load_esempi():
             with open(file_path, "r", encoding="utf-8") as f:
                 esempi_content.append(f.read().strip())
         except FileNotFoundError:
-            st.error(f"Errore: Il file '{file_path.name}' non è stato trovato in '{ESEMPI_DIR.name}'.")
+            # Non-critical, so warning instead of error
+            st.warning(f"Attenzione: Il file di esempio '{file_path.name}' non è stato trovato in '{ESEMPI_DIR.name}'.")
             continue
         except Exception as e:
             st.error(f"Errore durante la lettura di '{file_path.name}': {e}")
@@ -54,11 +55,11 @@ def load_esempi():
 # --- OpenAI API Key Handling ---
 try:
     openai_api_key = st.secrets.get("OPENAI_API_KEY")
-except (AttributeError, KeyError):
+except (AttributeError, KeyError): # Handle cases where st.secrets might not be available or key missing
     openai_api_key = None
 
 st.set_page_config(layout="wide")
-st.title(f"🎙️ Zanzara Tigre generator ({GPT_MODEL} & {TRANSCRIPTION_MODEL}) 📰") # Updated title
+st.title(f"🎙️ Zanzara Tigre generator ({GPT_MODEL} & {TRANSCRIPTION_MODEL}) 📰")
 
 if not openai_api_key:
     openai_api_key_input = st.text_input(
@@ -106,12 +107,12 @@ transcribe_only = st.checkbox(
     help=f"Se selezionato, verrà generata solo la trascrizione del file audio/video con {TRANSCRIPTION_MODEL}, senza inviarla a {GPT_MODEL}."
 )
 
-def gpt_request(model_id, query_content, temperature=0.8): # model_id is already a parameter
+def gpt_request(model_id, query_content, temperature=0.8):
     """Sends a request to the OpenAI Chat Completions API."""
     messages = [{'role': 'user', 'content': query_content}]
     try:
         response = client.chat.completions.create(
-            model=model_id, # Uses the passed model_id
+            model=model_id,
             messages=messages,
             temperature=temperature
         )
@@ -121,9 +122,9 @@ def gpt_request(model_id, query_content, temperature=0.8): # model_id is already
     except openai.RateLimitError as e:
         st.error(f"Rate limit superato per l'API OpenAI: {e}")
     except openai.APIStatusError as e:
-        st.error(f"Errore API OpenAI: {e.status_code} - {e.response}")
+        st.error(f"Errore API OpenAI: Status {e.status_code} - {e.message}")
     except Exception as e:
-        st.error(f"Un errore inaspettato è occorso durante la richiesta GPT: {e}")
+        st.error(f"Un errore inaspettato è occorso durante la richiesta a {model_id}: {e}")
     return None
 
 if uploaded_file is not None:
@@ -137,16 +138,13 @@ if uploaded_file is not None:
         button_label = f"🚀 Trascrivi ({TRANSCRIPTION_MODEL}) e Analizza con {GPT_MODEL}"
 
     if st.button(button_label, key="process_button"):
-        main_prompt_instruction = load_main_prompt()
-        esempi_texts = load_esempi()
-
-        if not main_prompt_instruction and not transcribe_only:
-            st.error(f"Impossibile caricare il prompt principale ('prompt.txt'). Necessario per l'analisi {GPT_MODEL}.")
-            st.stop()
-
+        # File size check (OpenAI Whisper API limit is 25 MB)
         MAX_BYTES = 25 * 1024 * 1024
         if uploaded_file.size > MAX_BYTES:
-            st.error(f"Il file caricato ({uploaded_file.size / (1024*1024):.2f} MB) supera il limite di 25 MB per l'API {TRANSCRIPTION_MODEL}. Riduci la dimensione del file o usa un estratto più breve.")
+            st.error(
+                f"Il file caricato ({uploaded_file.size / (1024*1024):.2f} MB) supera il limite di 25 MB "
+                f"per l'API {TRANSCRIPTION_MODEL}. Riduci la dimensione del file o usa un estratto più breve."
+            )
             st.stop()
 
         st.write("Dettagli file caricato:", {
@@ -155,91 +153,108 @@ if uploaded_file is not None:
             "Tipo": uploaded_file.type
         })
 
-        trascrizione = None
-        try:
-            with st.spinner(f"Attendere prego: Trascrizione audio con {TRANSCRIPTION_MODEL} in corso..."):
-                uploaded_file.seek(0)
-                transcript_response = client.audio.transcriptions.create(
-                    model=TRANSCRIPTION_MODEL, # Use constant
-                    file=uploaded_file,
-                    response_format="text"
+        # --- 1. Transcription ---
+        trascrizione_raw = None
+        with st.spinner(f"Attendere prego: Trascrizione audio con {TRANSCRIPTION_MODEL} in corso..."):
+            try:
+                uploaded_file.seek(0) # Reset file pointer to the beginning
+                # The OpenAI client expects the file object directly.
+                # Streamlit's UploadedFile is a BytesIO-like object, which is compatible.
+                transcript_response_text = client.audio.transcriptions.create(
+                    model=TRANSCRIPTION_MODEL,
+                    file=uploaded_file, # Pass the file object directly
+                    response_format="text" # Ensures the response is plain text
                 )
-            
-            if isinstance(transcript_response, str):
-                 trascrizione = transcript_response.replace("\n", " ").strip()
-            else:
-                 trascrizione = str(transcript_response).replace("\n", " ").strip()
+                # For response_format="text", the SDK directly returns the transcribed string.
+                trascrizione_raw = transcript_response_text.strip()
 
-            st.subheader(f"📄 Trascrizione Ottenuta (da {TRANSCRIPTION_MODEL}):")
-            st.text_area(
-                "Testo trascritto (puoi selezionare e copiare questo testo):",
-                value=trascrizione if trascrizione else "Trascrizione non disponibile o vuota.",
-                height=250,
-                key="transcription_output_area",
-                help="Clicca all'interno di quest'area e usa Ctrl+C (o Cmd+C su Mac) per copiare il testo."
-            )
-        except Exception as e:
-            st.error(f"Errore durante la trascrizione {TRANSCRIPTION_MODEL}: {e}")
-            st.exception(e)
-            st.stop()
+            except openai.APIError as e: # Catch specific OpenAI errors
+                st.error(f"Errore API OpenAI durante la trascrizione con {TRANSCRIPTION_MODEL}: {e}")
+                st.exception(e) # Provides full traceback for debugging in logs/console
+                st.stop()
+            except Exception as e: # Catch any other exceptions during transcription
+                st.error(f"Errore generico durante la trascrizione con {TRANSCRIPTION_MODEL}: {e}")
+                st.exception(e)
+                st.stop()
 
-        if trascrizione:
-            if not transcribe_only:
-                if not main_prompt_instruction:
-                    st.error(f"Prompt principale mancante, impossibile procedere con l'analisi {GPT_MODEL}.")
-                    st.stop()
+        st.subheader(f"📄 Trascrizione Ottenuta (da {TRANSCRIPTION_MODEL}):")
+        if trascrizione_raw: # Check if transcription is not empty
+            st.code(trascrizione_raw, language='text')
+            st.caption("Trascrizione completa. Usa l'icona di copia (solitamente in alto a destra del blocco di testo) per copiare.")
+        else:
+            # This handles cases where transcription might be an empty string (e.g., silent audio)
+            # or if it somehow remained None (though st.stop() in except block should prevent this).
+            st.warning("La trascrizione è risultata vuota.")
+            if trascrizione_raw is None: # Should ideally not be reached if errors are caught
+                st.error("Errore critico: la trascrizione non è disponibile. Elaborazione interrotta.")
+                st.stop()
 
-                with st.spinner(f"Attendere prego: Analisi {GPT_MODEL} in corso..."):
-                    esempi_block = "<esempi>\n"
-                    if esempi_texts:
-                        for esempio_text in esempi_texts:
-                            esempi_block += f"        <esempio>\n            {esempio_text}\n        </esempio>\n"
-                    else:
-                        esempi_block += "        \n"
-                    esempi_block += "</esempi>"
 
-                    additional_instructions_block = ""
-                    if user_additional_instructions.strip():
-                        additional_instructions_block = f"\n<additional_instructions>\n{user_additional_instructions.strip()}\n</additional_instructions>\n"
+        # --- 2. Conditional GPT Analysis ---
+        if transcribe_only:
+            if trascrizione_raw: # Only show success if transcription has content
+                st.success(f"✔️ Trascrizione con {TRANSCRIPTION_MODEL} completata. L'analisi {GPT_MODEL} è stata saltata come richiesto.")
+            # If trascrizione_raw is empty, the warning above is sufficient.
+        else:
+            # Proceed with GPT analysis
+            if not trascrizione_raw:
+                st.warning(
+                    f"La trascrizione è risultata vuota. L'analisi {GPT_MODEL} procederà con un input testuale vuoto. "
+                    "Il risultato potrebbe non essere significativo a meno che il prompt o le istruzioni aggiuntive non gestiscano questo caso."
+                )
 
-                    full_prompt_for_gpt = f"""{main_prompt_instruction}
+            main_prompt_instruction = load_main_prompt() # load_main_prompt has st.stop() on failure
+            esempi_texts = load_esempi() # Loads examples, with warnings if not found
+
+            with st.spinner(f"Attendere prego: Analisi con {GPT_MODEL} in corso..."):
+                esempi_block = "<esempi>\n"
+                if esempi_texts:
+                    for esempio_text in esempi_texts:
+                        # Ensure example text is properly formatted if it contains special XML characters,
+                        # but for simple text, direct inclusion is usually fine.
+                        esempi_block += f"        <esempio>\n            {esempio_text}\n        </esempio>\n"
+                else:
+                    esempi_block += "        \n"
+                esempi_block += "</esempi>"
+
+                additional_instructions_block = ""
+                if user_additional_instructions.strip():
+                    additional_instructions_block = (
+                        f"\n<additional_instructions>\n{user_additional_instructions.strip()}\n</additional_instructions>\n"
+                    )
+
+                # Prepare transcription for GPT input (replace newlines with spaces, as in original logic)
+                trascrizione_for_gpt_input = trascrizione_raw.replace("\n", " ").strip() if trascrizione_raw else ""
+
+                full_prompt_for_gpt = f"""{main_prompt_instruction}
 
 {esempi_block}
 {additional_instructions_block}
 <input>
-    {trascrizione}
+    {trascrizione_for_gpt_input}
 </input>
 """
+                if st.checkbox(f"Mostra prompt completo inviato a {GPT_MODEL} (per debug)", False, key="show_prompt_checkbox"):
+                    st.text_area(f"Prompt per {GPT_MODEL}:", full_prompt_for_gpt, height=300, key="full_prompt_display")
 
-                    if st.checkbox(f"Mostra prompt completo inviato a {GPT_MODEL} (per debug)", False, key="show_prompt_checkbox"):
-                        st.text_area(f"Prompt {GPT_MODEL}:", full_prompt_for_gpt, height=300, key="full_prompt_display")
+                gpt_response_obj = gpt_request(GPT_MODEL, full_prompt_for_gpt, 0.8)
 
-                    gpt_response_obj = gpt_request(GPT_MODEL, full_prompt_for_gpt, 0.8) # Use constant
+                if gpt_response_obj and gpt_response_obj.choices:
+                    risultato_gpt = gpt_response_obj.choices[0].message.content.strip()
+                    st.subheader(f"📰 Risultato dall'Analisi {GPT_MODEL}:")
+                    st.markdown(risultato_gpt) # Display rendered markdown
 
-                    if gpt_response_obj and gpt_response_obj.choices:
-                        risultato_gpt = gpt_response_obj.choices[0].message.content.strip()
-                        st.subheader(f"📰 Risultato dall'Analisi {GPT_MODEL}:")
-                        st.markdown(risultato_gpt)
-
-                        with st.expander("Copia il risultato dell'analisi (testo grezzo)", expanded=True):
-                            st.text_area(
-                                "Testo dell'analisi (per copia-incolla):",
-                                value=risultato_gpt,
-                                height=300,
-                                key="gpt_result_copy_area",
-                                help="Clicca all'interno di quest'area e usa Ctrl+C (o Cmd+C su Mac) per copiare il testo."
-                            )
-                    else:
-                        st.error(f"Non è stato possibile ottenere una risposta da {GPT_MODEL} o la risposta era vuota.")
-            elif trascrizione:
-                st.success(f"✔️ Trascrizione con {TRANSCRIPTION_MODEL} completata. L'analisi {GPT_MODEL} è stata saltata come richiesto.")
-            
-            if not trascrizione.strip() and not transcribe_only:
-                st.warning(f"La trascrizione è risultata vuota. L'analisi {GPT_MODEL} è stata eseguita su testo vuoto (se non saltata).")
-            elif not trascrizione.strip() and transcribe_only:
-                 st.warning("La trascrizione è risultata vuota.")
+                    with st.expander("Copia il risultato dell'analisi (testo grezzo)", expanded=False):
+                        st.code(risultato_gpt, language='text')
+                        st.caption("Testo grezzo dell'analisi. Usa l'icona di copia (solitamente in alto a destra) per copiare.")
+                else:
+                    st.error(f"Non è stato possibile ottenere una risposta valida da {GPT_MODEL} o la risposta era vuota.")
 else:
     st.info("Carica un file audio o video per iniziare.")
 
 st.markdown("---")
-st.markdown(f"App creata con Streamlit e OpenAI. Modelli usati: {TRANSCRIPTION_MODEL} per la trascrizione, {GPT_MODEL} per l'analisi. Legge il prompt da `prompt.txt` e gli esempi (opzionali) dalla directory `esempi/`.")
+st.markdown(
+    f"App creata con Streamlit e OpenAI. Modelli usati: **{TRANSCRIPTION_MODEL}** per la trascrizione, "
+    f"**{GPT_MODEL}** per l'analisi. Legge il prompt da `prompt.txt` e gli esempi (opzionali) "
+    f"dalla directory `esempi/`."
+)
